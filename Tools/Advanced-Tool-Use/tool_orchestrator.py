@@ -1,6 +1,7 @@
 """
 title: Advanced Tool Use
 author: Joshua Dixon
+author_url: https://github.com/Joshua-Dixon-AI
 version: 0.3.4
 license: MIT
 description: >
@@ -8,6 +9,7 @@ description: >
     OpenAPI, and local tools on demand, then call one tool or run a sandboxed
     Python workflow that orchestrates many tool calls while returning only the
     final result to chat.
+repository: https://github.com/Joshua-Dixon-AI/openwebui
 """
 
 import ast

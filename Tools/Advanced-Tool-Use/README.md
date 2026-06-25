@@ -11,6 +11,12 @@ Attach one tool instead of dozens. It preserves per-user access controls,
 reduces context bloat, and keeps intermediate tool results out of the
 conversation.
 
+**Security note:** Code mode is off by default. Enable it only in trusted
+environments.
+
+Source:
+https://github.com/Joshua-Dixon-AI/openwebui/tree/main/Tools/Advanced-Tool-Use
+
 Zero patches to Open WebUI. Works with vanilla installs.
 
 ## Why it matters
