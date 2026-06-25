@@ -2,7 +2,7 @@
 title: Advanced Tool Use
 author: Joshua Dixon
 author_url: https://github.com/Joshua-Dixon-AI
-version: 0.3.4
+version: 0.3.5
 license: MIT
 description: >
     Tool Search + Programmatic Tool Calling for Open WebUI. Search across MCP,
@@ -435,6 +435,7 @@ class Tools:
             ),
         )
         code_timeout: float = Field(default=60.0, description="Max wall-clock seconds for an orchestration script (also caps CPU loops).")
+        code_tool_call_timeout: float = Field(default=30.0, description="Max seconds for each tool/search operation inside run_tool_script (0 = unlimited).")
         code_max_calls: int = Field(default=50, description="Max tool calls a single script may make (0 = unlimited).")
         code_max_output_chars: int = Field(default=24000, description="Max characters of script output returned to the model.")
 
@@ -1038,9 +1039,22 @@ class Tools:
             buffer: list[str] = []
             call_count = {"n": 0}
             max_calls = self.valves.code_max_calls
+            tool_call_timeout = self.valves.code_tool_call_timeout
 
             def _print(*args, sep=" ", end="\n", **_kw):
                 buffer.append(sep.join(str(a) for a in args) + end)
+
+            async def _await_main_future(cf, label):
+                wrapped = asyncio.wrap_future(cf)
+                if tool_call_timeout and tool_call_timeout > 0:
+                    try:
+                        return await asyncio.wait_for(wrapped, timeout=tool_call_timeout)
+                    except asyncio.TimeoutError:
+                        cf.cancel()
+                        raise RuntimeError(
+                            f"{label} exceeded code_tool_call_timeout ({tool_call_timeout}s)"
+                        ) from None
+                return await wrapped
 
             # call()/search() run their actual I/O on the MAIN event loop (the loop
             # the DB engine, MCP clients and aiohttp sessions were created on),
@@ -1058,15 +1072,15 @@ class Tools:
                     self._invoke(__request__, user_model, server_id, function_name, merged, __metadata__),
                     main_loop,
                 )
-                return await asyncio.wrap_future(cf)
+                return await _await_main_future(cf, f"tool call {server_id}.{function_name}")
 
             async def _search(query, top_k=None):
                 cf = asyncio.run_coroutine_threadsafe(
                     self._accessible_entries(__request__, user_model), main_loop
                 )
-                allowed = await asyncio.wrap_future(cf)
+                allowed = await _await_main_future(cf, "script search access check")
                 cfq = asyncio.run_coroutine_threadsafe(self._embed_query(__request__, query), main_loop)
-                qe = await asyncio.wrap_future(cfq)
+                qe = await _await_main_future(cfq, "script search embedding")
                 res = self._hybrid_search(query, qe, allowed, top_k or self.valves.search_top_k)
                 return [{"server_id": e.server_id, "function_name": e.name,
                          "description": e.description, "parameters": e.parameters} for e in res]
@@ -1108,9 +1122,11 @@ class Tools:
                     asyncio.set_event_loop(worker_loop)
                     sys.settrace(_tracer)
                     worker_loop.run_until_complete(sandbox["__ptc_main__"]())
-                    done.set_result(True)
+                    if not done.done():
+                        done.set_result(True)
                 except BaseException as exc:  # propagate everything to the caller
-                    done.set_exception(exc)
+                    if not done.done():
+                        done.set_exception(exc)
                 finally:
                     sys.settrace(None)
                     try:

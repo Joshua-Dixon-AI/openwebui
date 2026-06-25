@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.5
+
+- Added `code_tool_call_timeout` to cap each tool/search operation inside
+  `run_tool_script`.
+- Timed-out tool calls are cancelled and reported as explicit script errors
+  instead of leaving the workflow stuck in an executing state.
+- Guarded worker completion against late writes after a whole-script timeout.
+
 ## v0.3.4
 
 - Renamed the published tool to **Advanced Tool Use**.
