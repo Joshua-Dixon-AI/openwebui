@@ -12,7 +12,10 @@ Open-source tools, filters, functions, and related utilities for Open WebUI.
 
 ## Filters
 
-No filters published yet.
+- [Context Manager](Filters/Context-Manager/)  
+  Deterministic prompt-context compaction for Open WebUI. Preserves system
+  instructions and recent turns, compacts stale history into a retained summary,
+  and drops raw older messages before the request reaches the model.
 
 ## Functions
 
