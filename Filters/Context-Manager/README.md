@@ -28,6 +28,8 @@ and emits a separate exact status such as:
 Exact provider usage: input 13468, output 487, total 13955
 ```
 
+![Exact provider usage shown in Open WebUI](assets/exact-provider-usage.png)
+
 The pre-call bar is still an estimate because exact provider usage does not
 exist until the provider has processed the request. When available, the estimate
 uses Open WebUI's configured `TIKTOKEN_ENCODING_NAME`; otherwise it falls back to
