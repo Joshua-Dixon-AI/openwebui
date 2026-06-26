@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.6
+
+- Changed `list_servers()` to return a compact server inventory instead of
+  listing every function on every server.
+- Updated discovery guidance so models use `search_tools()` for task-specific
+  tool names and schemas, and reserve `list_servers()` for integration
+  visibility.
+
 ## v0.3.5
 
 - Added `code_tool_call_timeout` to cap each tool/search operation inside

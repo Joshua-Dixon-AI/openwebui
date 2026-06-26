@@ -59,7 +59,7 @@ more tool calls + bigger intermediate data → bigger win.*
 | Function | Purpose |
 |---|---|
 | `search_tools(query, limit?)` | Hybrid search over accessible tools; returns names, descriptions, parameter schemas. |
-| `list_servers()` | Full catalogue of accessible servers and their functions (for "what can you do?"). |
+| `list_servers()` | Compact list of accessible tool servers; returns server ids, names, types, and function counts only. |
 | `call_tool(server_id, function_name, arguments)` | Execute a single tool, with per-server output limits applied. |
 | `run_tool_script(code)` | **Programmatic Tool Calling** — orchestrate many tools in one Python script. |
 | `refresh_index()` | Force an index rebuild after adding tools/servers. |
@@ -88,9 +88,14 @@ You have Advanced Tool Use, not the underlying tools directly. Discovered
 functions (e.g. execute_sql_read_only) are NOT callable as top-level tool calls.
 
 To use any capability:
-  • Discover it:        search_tools("...")  or  list_servers()
+  • Discover tools:     search_tools("...")
+  • List integrations:  list_servers()
   • Run ONE call:       call_tool(server_id, function_name, arguments)
   • Run MULTIPLE calls: run_tool_script(code)   ← strongly preferred
+
+Use list_servers only to inspect which integrations are available. It does not
+return tool schemas or function names; use search_tools for task-specific
+discovery.
 
 Use run_tool_script whenever a task needs 3+ calls, parallel calls, loops, or
 filtering/aggregating results — it keeps intermediate data out of context.
