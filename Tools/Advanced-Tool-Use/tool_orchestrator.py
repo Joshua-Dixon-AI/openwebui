@@ -2,7 +2,7 @@
 title: Advanced Tool Use
 author: Joshua Dixon
 author_url: https://github.com/Joshua-Dixon-AI
-version: 0.3.5
+version: 0.3.6
 license: MIT
 description: >
     Tool Search + Programmatic Tool Calling for Open WebUI. Search across MCP,
@@ -824,7 +824,7 @@ class Tools:
         Find tool functions by describing the capability you need. Returns matches
         with their server_id, function_name, description, and JSON parameter schema.
         Call this before call_tool or run_tool_script to discover names/arguments.
-        To see EVERY available tool at once, call list_servers instead.
+        Use list_servers only to see which tool servers are accessible.
 
         :param query: Natural-language capability, e.g. "create a Jira ticket" or "query the warehouse".
         :param limit: Optional max number of results to return (defaults to the configured top-K).
@@ -894,12 +894,11 @@ class Tools:
     async def list_servers(self, __request__=None, __user__=None,
                            __event_emitter__=None, __id__="tool_orchestrator") -> str:
         """
-        List every tool server you can access AND every function on each one
-        (name + short description). This is the complete catalogue — use it to
-        answer "what tools do you have?" in a single call instead of repeatedly
-        searching. Use search_tools when you need full parameter schemas.
+        List accessible tool servers without exposing their individual tool
+        schemas. Use this to answer "what integrations are available?" or to
+        diagnose access. Use search_tools for task-specific tool discovery.
 
-        :return: JSON array of servers, each with its full list of functions.
+        :return: JSON array of servers with id, name, type, and function count.
         """
         await self._emit(__event_emitter__, "📡 Discovering accessible servers...")
         try:
@@ -910,14 +909,12 @@ class Tools:
             for e in allowed:
                 s = servers.setdefault(e.server_id, {
                     "server_id": e.server_id, "server_name": e.server_name,
-                    "server_type": e.server_type, "function_count": 0, "functions": [],
+                    "server_type": e.server_type, "function_count": 0,
                 })
                 s["function_count"] += 1
-                desc = (e.description or "").strip().split("\n")[0][:120]
-                s["functions"].append({"function_name": e.name, "description": desc})
             out = list(servers.values())
             total = sum(s["function_count"] for s in out)
-            await self._emit(__event_emitter__, f"✅ {len(out)} server(s), {total} function(s) accessible", done=True)
+            await self._emit(__event_emitter__, f"✅ {len(out)} server(s) accessible ({total} function(s) indexed)", done=True)
             return json.dumps(out, indent=2)
         except Exception as e:
             msg = f"Error listing servers: {e}"
