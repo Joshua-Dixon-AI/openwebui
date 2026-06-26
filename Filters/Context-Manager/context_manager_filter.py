@@ -25,6 +25,17 @@ def _approx_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
+def _count_text_tokens(text: str, encoding: Any = None) -> int:
+    if not text:
+        return 0
+    if encoding is not None:
+        try:
+            return len(encoding.encode(text))
+        except Exception:
+            pass
+    return _approx_tokens(text)
+
+
 def _content_to_text(content: Any) -> str:
     if content is None:
         return ""
@@ -63,12 +74,19 @@ def _message_text(message: dict) -> str:
     return "\n".join(parts)
 
 
-def _estimate_message_tokens(message: dict) -> int:
-    return 4 + _approx_tokens(message.get("role", "")) + _approx_tokens(_message_text(message))
+def _estimate_message_tokens(message: dict, encoding: Any = None) -> int:
+    # Chat message overhead varies by provider/model. The `4` token baseline
+    # mirrors common OpenAI-style chat counting and keeps this honest as an
+    # estimate even when tiktoken is available for text content.
+    return (
+        4
+        + _count_text_tokens(message.get("role", ""), encoding)
+        + _count_text_tokens(_message_text(message), encoding)
+    )
 
 
-def _estimate_messages_tokens(messages: list[dict]) -> int:
-    return sum(_estimate_message_tokens(m) for m in messages)
+def _estimate_messages_tokens(messages: list[dict], encoding: Any = None) -> int:
+    return sum(_estimate_message_tokens(m, encoding) for m in messages)
 
 
 def _first_line(text: str, max_chars: int) -> str:
@@ -167,7 +185,15 @@ class Filter:
         )
         show_usage_status: bool = Field(
             default=True,
-            description="Show a visible context usage status before each model call.",
+            description="Show a visible estimated context usage status before each model call.",
+        )
+        use_tiktoken_estimate: bool = Field(
+            default=True,
+            description="Use Open WebUI's configured tiktoken encoding for pre-call estimates when available.",
+        )
+        show_exact_usage_status: bool = Field(
+            default=True,
+            description="Show exact provider-reported token usage after each model response when Open WebUI provides it.",
         )
         debug_events: bool = Field(default=False, description="Show pruning status events in chat.")
 
@@ -187,6 +213,46 @@ class Filter:
                     "done": True,
                 },
             })
+
+    async def _emit_exact_usage(self, emitter, usage: dict):
+        if not (emitter and self.valves.show_exact_usage_status and usage):
+            return
+        input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens")
+        output_tokens = usage.get("output_tokens") or usage.get("completion_tokens")
+        total_tokens = usage.get("total_tokens")
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = int(input_tokens) + int(output_tokens)
+        if input_tokens is None and output_tokens is None and total_tokens is None:
+            return
+        parts = []
+        if input_tokens is not None:
+            parts.append(f"input {input_tokens}")
+        if output_tokens is not None:
+            parts.append(f"output {output_tokens}")
+        if total_tokens is not None:
+            parts.append(f"total {total_tokens}")
+        await emitter({
+            "type": "status",
+            "data": {
+                "description": "Exact provider usage: " + ", ".join(parts),
+                "done": True,
+            },
+        })
+
+    def _encoding(self, request: Any = None) -> Any:
+        if not self.valves.use_tiktoken_estimate:
+            return None
+        try:
+            import tiktoken
+
+            encoding_name = "cl100k_base"
+            if request is not None:
+                encoding_name = str(
+                    getattr(request.app.state.config, "TIKTOKEN_ENCODING_NAME", encoding_name)
+                )
+            return tiktoken.get_encoding(encoding_name)
+        except Exception:
+            return None
 
     def _pinned_indexes(self, messages: list[dict]) -> set[int]:
         pattern = (self.valves.pinned_regex or "").strip()
@@ -276,7 +342,30 @@ class Filter:
                 insert_at = i + 1
         return messages[:insert_at] + [notice] + messages[insert_at:]
 
-    async def inlet(self, body: dict, __event_emitter__=None, __user__: Optional[dict] = None) -> dict:
+    @staticmethod
+    def _latest_usage(body: dict) -> dict:
+        if not isinstance(body, dict):
+            return {}
+        if isinstance(body.get("usage"), dict):
+            return body["usage"]
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if isinstance(message, dict) and isinstance(message.get("usage"), dict):
+                    return message["usage"]
+        return {}
+
+    async def outlet(self, body: dict, __event_emitter__=None, __user__: Optional[dict] = None) -> dict:
+        await self._emit_exact_usage(__event_emitter__, self._latest_usage(body))
+        return body
+
+    async def inlet(
+        self,
+        body: dict,
+        __event_emitter__=None,
+        __user__: Optional[dict] = None,
+        __request__=None,
+    ) -> dict:
         """
         Prune chat history before the model sees it.
 
@@ -297,9 +386,10 @@ class Filter:
         if len(working) != len(messages):
             body["messages"] = working
 
-        original_tokens = _estimate_messages_tokens(working)
+        encoding = self._encoding(__request__)
+        original_tokens = _estimate_messages_tokens(working, encoding)
         if original_tokens <= budget:
-            await self._emit_usage(__event_emitter__, original_tokens, budget)
+            await self._emit_usage(__event_emitter__, original_tokens, budget, label="Estimated context")
             await self._emit(
                 __event_emitter__,
                 f"Context Manager: prompt fits budget (~{original_tokens}/{budget} tokens).",
@@ -334,7 +424,7 @@ class Filter:
                     trimmed_count += 1
 
         dropped: list[dict] = []
-        if _estimate_messages_tokens(working) > budget:
+        if _estimate_messages_tokens(working, encoding) > budget:
             candidate_indexes = [i for i in range(total) if i not in keep_indexes]
             if self.valves.prefer_drop_tool_messages:
                 candidate_indexes.sort(
@@ -348,14 +438,20 @@ class Filter:
 
             drop_indexes: set[int] = set()
             for i in candidate_indexes:
-                if _estimate_messages_tokens([m for j, m in enumerate(working) if j not in drop_indexes]) <= budget:
+                if (
+                    _estimate_messages_tokens(
+                        [m for j, m in enumerate(working) if j not in drop_indexes],
+                        encoding,
+                    )
+                    <= budget
+                ):
                     break
                 drop_indexes.add(i)
                 dropped.append(working[i])
 
             working = [m for i, m in enumerate(working) if i not in drop_indexes]
 
-        final_tokens_without_summary = _estimate_messages_tokens(working)
+        final_tokens_without_summary = _estimate_messages_tokens(working, encoding)
         if self.valves.add_pruning_notice and (dropped or trimmed_count):
             max_details = max(0, int(self.valves.compaction_detail_messages or 0))
             for detail_limit in range(max_details, -1, -1):
@@ -368,13 +464,18 @@ class Filter:
                     detail_limit_override=detail_limit,
                 )
                 candidate = self._insert_notice(working, notice)
-                if _estimate_messages_tokens(candidate) <= budget or detail_limit == 0:
+                if _estimate_messages_tokens(candidate, encoding) <= budget or detail_limit == 0:
                     working = candidate
                     break
 
-        final_tokens = _estimate_messages_tokens(working)
+        final_tokens = _estimate_messages_tokens(working, encoding)
         body["messages"] = working
-        await self._emit_usage(__event_emitter__, final_tokens, budget, label="Context after compaction")
+        await self._emit_usage(
+            __event_emitter__,
+            final_tokens,
+            budget,
+            label="Estimated context after compaction",
+        )
         await self._emit(
             __event_emitter__,
             (

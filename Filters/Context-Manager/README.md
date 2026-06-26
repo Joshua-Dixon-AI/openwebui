@@ -9,15 +9,29 @@ prompt would exceed a configured budget. Old tool/function messages remain
 droppable even if they are near the end of the chat; active trailing tool
 results for the current model step are preserved.
 
-By default, the filter also emits a visible context usage status before each
-model call, for example:
+By default, the filter also emits a visible estimated context usage status before
+each model call, for example:
 
 ```text
-Context: [########------------] 42% (~10080/24000 tokens)
+Estimated context: [########------------] 42% (~10080/24000 tokens)
 ```
 
 This is plugin-level visibility during the request. A persistent native usage
 bar in the chat chrome would require an Open WebUI frontend/core change.
+
+Open WebUI also stores exact provider-reported usage after a response completes
+(`prompt_tokens`/`completion_tokens`, normalized to `input_tokens`/`output_tokens`
+internally). This filter reads that in `outlet` when Open WebUI passes it through
+and emits a separate exact status such as:
+
+```text
+Exact provider usage: input 13468, output 487, total 13955
+```
+
+The pre-call bar is still an estimate because exact provider usage does not
+exist until the provider has processed the request. When available, the estimate
+uses Open WebUI's configured `TIKTOKEN_ENCODING_NAME`; otherwise it falls back to
+a conservative character-based estimate.
 
 ## How Compaction Works
 
@@ -71,12 +85,17 @@ current task first.
 | `add_pruning_notice` | true | Insert a compact system summary after compaction. |
 | `compaction_detail_messages` | 8 | Maximum number of compacted older messages to describe in the retained summary. |
 | `compaction_snippet_chars` | 220 | Maximum characters per compacted message snippet. |
-| `show_usage_status` | true | Show a visible context usage status before each model call. |
+| `show_usage_status` | true | Show a visible estimated context usage status before each model call. |
+| `use_tiktoken_estimate` | true | Use Open WebUI's configured tiktoken encoding for pre-call estimates when available. |
+| `show_exact_usage_status` | true | Show exact provider-reported token usage after each model response when Open WebUI provides it. |
 | `debug_events` | false | Show pruning status events in chat. |
 
 ## Notes
 
-- Token counts are approximate, using a conservative character-based estimate.
+- Pre-call token counts are estimates. They use `tiktoken` when available and
+  fall back to a conservative character-based estimate.
+- Exact provider token counts are only available after the response and can be
+  displayed by the `outlet` hook.
 - The filter is deterministic. It does not call another model to summarize.
 - If the preserved system messages, latest conversational turns, and active
   trailing tool results exceed the budget by themselves, the filter will keep
