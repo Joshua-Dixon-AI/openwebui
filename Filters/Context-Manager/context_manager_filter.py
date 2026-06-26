@@ -184,12 +184,12 @@ class Filter:
             description="Maximum characters per compacted message snippet.",
         )
         show_usage_status: bool = Field(
-            default=True,
-            description="Show a visible estimated context usage status before each model call.",
+            default=False,
+            description="Show a rough estimated context usage status before each model call.",
         )
         use_tiktoken_estimate: bool = Field(
             default=True,
-            description="Use Open WebUI's configured tiktoken encoding for pre-call estimates when available.",
+            description="Use Open WebUI's configured tiktoken encoding for internal compaction estimates when available.",
         )
         show_exact_usage_status: bool = Field(
             default=True,
@@ -209,7 +209,7 @@ class Filter:
             await emitter({
                 "type": "status",
                 "data": {
-                    "description": f"{label}: {_usage_bar(tokens, budget)} (~{tokens}/{budget} tokens)",
+                    "description": f"{label}: {_usage_bar(tokens, budget)} (~{tokens}/{budget} estimated tokens)",
                     "done": True,
                 },
             })
