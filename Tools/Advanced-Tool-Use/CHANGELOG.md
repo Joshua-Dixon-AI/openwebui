@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.7
+
+- On whole-script `run_tool_script` timeout, cancel any outstanding bridged
+  tool/search calls instead of letting them continue in the background.
+- Return the configured `code_timeout` and number of cancelled bridged calls in
+  timeout errors.
+
 ## v0.3.6
 
 - Changed `list_servers()` to return a compact server inventory instead of

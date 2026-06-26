@@ -142,14 +142,16 @@ in-process sandbox:
 - Blocked `_`-prefixed attribute access and `str.format()` / `format_map()`
   traversal — kills classic hidden-attribute escapes.
 - Runs in a **separate thread** with a wall-clock timeout that also **interrupts
-  CPU-bound loops**, so a runaway script cannot block the server.
+  CPU-bound loops** and cancels outstanding bridged tool calls, so a runaway
+  script cannot block the server.
 - A **per-user access check on every call**, plus a **tool-call cap** and
   per-call timeout so one slow MCP/API request cannot hang the whole workflow.
 
 It is a strong boundary, **not full process isolation**: it does **not hard-cap
 memory** (a giant allocation could OOM the host), and a thread wedged in a
-non-Python C call can't be force-killed (the main loop is freed and the request
-returns, but the thread may linger). For these reasons `enable_code_mode` is
+non-Python C call can't be force-killed (the main loop is freed, pending tool
+calls are cancelled, and the request returns, but the thread may linger). For
+these reasons `enable_code_mode` is
 **off by default** — enable it only in environments you trust. If you need to run
 this in a hostile multi-user setting, put a true subprocess/container sandbox in
 front of it.

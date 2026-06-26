@@ -2,7 +2,7 @@
 title: Advanced Tool Use
 author: Joshua Dixon
 author_url: https://github.com/Joshua-Dixon-AI
-version: 0.3.6
+version: 0.3.7
 license: MIT
 description: >
     Tool Search + Programmatic Tool Calling for Open WebUI. Search across MCP,
@@ -1037,21 +1037,33 @@ class Tools:
             call_count = {"n": 0}
             max_calls = self.valves.code_max_calls
             tool_call_timeout = self.valves.code_tool_call_timeout
+            cancel_script = threading.Event()
+            pending_bridge_futures: set[concurrent.futures.Future] = set()
+            pending_bridge_lock = threading.Lock()
 
             def _print(*args, sep=" ", end="\n", **_kw):
                 buffer.append(sep.join(str(a) for a in args) + end)
 
             async def _await_main_future(cf, label):
-                wrapped = asyncio.wrap_future(cf)
-                if tool_call_timeout and tool_call_timeout > 0:
-                    try:
-                        return await asyncio.wait_for(wrapped, timeout=tool_call_timeout)
-                    except asyncio.TimeoutError:
-                        cf.cancel()
-                        raise RuntimeError(
-                            f"{label} exceeded code_tool_call_timeout ({tool_call_timeout}s)"
-                        ) from None
-                return await wrapped
+                if cancel_script.is_set():
+                    cf.cancel()
+                    raise TimeoutError("script exceeded code_timeout")
+                with pending_bridge_lock:
+                    pending_bridge_futures.add(cf)
+                try:
+                    wrapped = asyncio.wrap_future(cf)
+                    if tool_call_timeout and tool_call_timeout > 0:
+                        try:
+                            return await asyncio.wait_for(wrapped, timeout=tool_call_timeout)
+                        except asyncio.TimeoutError:
+                            cf.cancel()
+                            raise RuntimeError(
+                                f"{label} exceeded code_tool_call_timeout ({tool_call_timeout}s)"
+                            ) from None
+                    return await wrapped
+                finally:
+                    with pending_bridge_lock:
+                        pending_bridge_futures.discard(cf)
 
             # call()/search() run their actual I/O on the MAIN event loop (the loop
             # the DB engine, MCP clients and aiohttp sessions were created on),
@@ -1111,8 +1123,9 @@ class Tools:
                 deadline = time.monotonic() + timeout
 
                 def _tracer(frame, event, arg):
-                    if time.monotonic() > deadline:
-                        raise TimeoutError("script exceeded code_timeout")
+                    if cancel_script.is_set() or time.monotonic() > deadline:
+                        cancel_script.set()
+                        raise TimeoutError(f"script exceeded code_timeout ({timeout}s)")
                     return _tracer
 
                 try:
@@ -1138,9 +1151,19 @@ class Tools:
                 # thread is wedged in a C call we still free the main loop here.
                 await asyncio.wait_for(asyncio.wrap_future(done), timeout=timeout + 5)
             except (asyncio.TimeoutError, TimeoutError):
+                cancel_script.set()
+                with pending_bridge_lock:
+                    pending = list(pending_bridge_futures)
+                    pending_bridge_futures.clear()
+                for cf in pending:
+                    cf.cancel()
                 partial = "".join(buffer)[: self.valves.code_max_output_chars]
                 await self._emit(__event_emitter__, "⏱️ Script timed out", done=True)
-                return json.dumps({"error": "Script exceeded time limit", "partial_output": partial})
+                return json.dumps({
+                    "error": f"Script exceeded code_timeout ({timeout}s)",
+                    "partial_output": partial,
+                    "cancelled_tool_calls": len(pending),
+                })
             except PermissionError as e:
                 return json.dumps({"error": f"Access denied during script: {e}",
                                    "output": "".join(buffer)[:2000]})
