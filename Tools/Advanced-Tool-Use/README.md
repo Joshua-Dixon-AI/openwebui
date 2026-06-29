@@ -48,6 +48,9 @@ more tool calls + bigger intermediate data → bigger win.*
 - **Hybrid search** — BM25 keyword scoring + semantic similarity using Open
   WebUI's own embedding function (falls back to keyword-only if no embedding
   model is configured).
+- **Timeout controls** — direct calls, script tool calls, and embeddings have
+  explicit timeouts so slow integrations fail visibly instead of leaving the
+  model in an executing state.
 - **Output limits** — single `call_tool` responses can be capped per server to
   tame verbose tools (e.g. Atlassian).
 - **Programmatic Tool Calling** — `run_tool_script` executes model-written
@@ -113,12 +116,14 @@ await gather(*...), rows(result) to flatten SQL results, print(...) to return.
 | `embedding_timeout` | 20 | Max seconds for embeddings before falling back to keyword-only. |
 | `semantic_weight` | 0.6 | Hybrid balance: 1.0 = pure semantic, 0.0 = pure keyword. |
 | `default_max_output_tokens` | 8000 | Default cap for a single `call_tool` response (0 = unlimited). |
+| `tool_call_timeout` | 30 | Max seconds for a standalone `call_tool` execution (0 = unlimited). |
 | `output_truncation_strategy` | head_tail | `head_tail` (keep start + end) or `truncate`. |
 | `server_token_limits` | "" | Per-server overrides, one per line: `server_id=limit`. |
 | `enable_code_mode` | **false** | Enable `run_tool_script` (executes model-written code). |
 | `code_timeout` | 60 | Max wall-clock seconds per script (also caps CPU loops). |
 | `code_tool_call_timeout` | 30 | Max seconds per tool/search operation inside `run_tool_script` (0 = unlimited). |
 | `code_max_calls` | 50 | Max tool calls a single script may make (0 = unlimited). |
+| `code_max_parallel_calls` | 8 | Max concurrent tool calls inside `run_tool_script` (0 = unlimited). |
 | `code_max_output_chars` | 24000 | Max characters of script output returned to the model. |
 | `debug_events` | false | Show step-by-step status events in chat (debugging). |
 
@@ -144,8 +149,9 @@ in-process sandbox:
 - Runs in a **separate thread** with a wall-clock timeout that also **interrupts
   CPU-bound loops** and cancels outstanding bridged tool calls, so a runaway
   script cannot block the server.
-- A **per-user access check on every call**, plus a **tool-call cap** and
-  per-call timeout so one slow MCP/API request cannot hang the whole workflow.
+- A **per-user access check on every call**, plus a **tool-call cap**,
+  parallel-call cap, and per-call timeout so slow MCP/API requests cannot hang
+  or flood the whole workflow.
 
 It is a strong boundary, **not full process isolation**: it does **not hard-cap
 memory** (a giant allocation could OOM the host), and a thread wedged in a

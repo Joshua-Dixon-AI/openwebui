@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.8
+
+- Added `tool_call_timeout` for standalone `call_tool` executions.
+- Applied `embedding_timeout` to normal tool searches as well as index builds.
+- Added `code_max_parallel_calls` to limit concurrent tool calls inside
+  `run_tool_script`.
+- Added compact diagnostics to script error and timeout responses, including
+  call counts, elapsed time, observed parallelism, and timed-out operations.
+
 ## v0.3.7
 
 - On whole-script `run_tool_script` timeout, cancel any outstanding bridged

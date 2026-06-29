@@ -2,7 +2,7 @@
 title: Advanced Tool Use
 author: Joshua Dixon
 author_url: https://github.com/Joshua-Dixon-AI
-version: 0.3.7
+version: 0.3.8
 license: MIT
 description: >
     Tool Search + Programmatic Tool Calling for Open WebUI. Search across MCP,
@@ -415,6 +415,7 @@ class Tools:
 
         # ── Output limits (single call_tool path only) ──
         default_max_output_tokens: int = Field(default=8000, description="Default max tokens for a single call_tool response (0 = unlimited).")
+        tool_call_timeout: float = Field(default=30.0, description="Max seconds for a standalone call_tool execution (0 = unlimited).")
         output_truncation_strategy: str = Field(
             default="head_tail",
             json_schema_extra={"input": {"type": "select", "options": [
@@ -437,6 +438,7 @@ class Tools:
         code_timeout: float = Field(default=60.0, description="Max wall-clock seconds for an orchestration script (also caps CPU loops).")
         code_tool_call_timeout: float = Field(default=30.0, description="Max seconds for each tool/search operation inside run_tool_script (0 = unlimited).")
         code_max_calls: int = Field(default=50, description="Max tool calls a single script may make (0 = unlimited).")
+        code_max_parallel_calls: int = Field(default=8, description="Max concurrent tool calls inside run_tool_script (0 = unlimited).")
         code_max_output_chars: int = Field(default=24000, description="Max characters of script output returned to the model.")
 
         # ── Debug ──
@@ -476,14 +478,25 @@ class Tools:
         except Exception:
             return None
 
+    @staticmethod
+    async def _maybe_timeout(awaitable, timeout):
+        if timeout and timeout > 0:
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        return await awaitable
+
     async def _embed_query(self, request, query) -> Optional[list[float]]:
         try:
             embed_fn = request.app.state.EMBEDDING_FUNCTION
             if not embed_fn:
                 return None
-            qe = await embed_fn(query, prefix=self._query_prefix())
+            qe = await self._maybe_timeout(
+                embed_fn(query, prefix=self._query_prefix()),
+                self.valves.embedding_timeout,
+            )
             if isinstance(qe, list) and qe:
                 return qe[0] if isinstance(qe[0], list) else qe
+        except asyncio.TimeoutError:
+            return None
         except Exception:
             return None
         return None
@@ -607,9 +620,9 @@ class Tools:
                 try:
                     embed_fn = request.app.state.EMBEDDING_FUNCTION
                     if embed_fn:
-                        vecs = await asyncio.wait_for(
+                        vecs = await self._maybe_timeout(
                             embed_fn([e.search_text for e in entries], prefix=self._content_prefix()),
-                            timeout=self.valves.embedding_timeout,
+                            self.valves.embedding_timeout,
                         )
                         if isinstance(vecs, list) and len(vecs) == len(entries):
                             for i, e in enumerate(entries):
@@ -877,7 +890,10 @@ class Tools:
             if not isinstance(args, dict):
                 return json.dumps({"error": "arguments must be a JSON object"})
             user_model = self._user_model(__user__)
-            result = await self._invoke(__request__, user_model, server_id, function_name, args, __metadata__)
+            result = await self._maybe_timeout(
+                self._invoke(__request__, user_model, server_id, function_name, args, __metadata__),
+                self.valves.tool_call_timeout,
+            )
             output, original, final = self._apply_output_policy(server_id, result)
             if final < original:
                 pct = round(final / original * 100) if original else 100
@@ -885,6 +901,11 @@ class Tools:
             else:
                 await self._emit(__event_emitter__, f"✅ {function_name} done", done=True)
             return output
+        except asyncio.TimeoutError:
+            timeout = self.valves.tool_call_timeout
+            msg = f"Tool call {server_id}.{function_name} exceeded tool_call_timeout ({timeout}s)"
+            await self._emit(__event_emitter__, f"⏱️ {msg}", done=True)
+            return json.dumps({"error": msg, "timeout_seconds": timeout})
         except Exception as e:
             msg = f"Error calling {function_name}: {e}"
             log.exception(msg)
@@ -1035,14 +1056,58 @@ class Tools:
             main_loop = asyncio.get_running_loop()
             buffer: list[str] = []
             call_count = {"n": 0}
+            search_count = {"n": 0}
             max_calls = self.valves.code_max_calls
+            parallel_limit = self.valves.code_max_parallel_calls
             tool_call_timeout = self.valves.code_tool_call_timeout
             cancel_script = threading.Event()
             pending_bridge_futures: set[concurrent.futures.Future] = set()
             pending_bridge_lock = threading.Lock()
+            timed_out_labels: list[str] = []
+            timed_out_lock = threading.Lock()
+            active_tool_calls = {"n": 0, "max": 0}
+            active_tool_lock = threading.Lock()
+            parallel_state = {"sem": None}
+            started_at = time.monotonic()
 
             def _print(*args, sep=" ", end="\n", **_kw):
                 buffer.append(sep.join(str(a) for a in args) + end)
+
+            def _parallel_semaphore():
+                if not parallel_limit or parallel_limit <= 0:
+                    return None
+                if parallel_state["sem"] is None:
+                    parallel_state["sem"] = asyncio.Semaphore(parallel_limit)
+                return parallel_state["sem"]
+
+            def _note_timeout(label):
+                with timed_out_lock:
+                    timed_out_labels.append(label)
+
+            def _enter_tool_call():
+                with active_tool_lock:
+                    active_tool_calls["n"] += 1
+                    active_tool_calls["max"] = max(active_tool_calls["max"], active_tool_calls["n"])
+
+            def _leave_tool_call():
+                with active_tool_lock:
+                    active_tool_calls["n"] = max(0, active_tool_calls["n"] - 1)
+
+            def _script_diagnostics(extra=None):
+                with timed_out_lock:
+                    timed_out = list(timed_out_labels)
+                with active_tool_lock:
+                    max_parallel_observed = active_tool_calls["max"]
+                out = {
+                    "tool_calls_started": call_count["n"],
+                    "searches_started": search_count["n"],
+                    "max_parallel_tool_calls": max_parallel_observed,
+                    "timed_out_operations": timed_out,
+                    "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                }
+                if extra:
+                    out.update(extra)
+                return out
 
             async def _await_main_future(cf, label):
                 if cancel_script.is_set():
@@ -1056,6 +1121,7 @@ class Tools:
                         try:
                             return await asyncio.wait_for(wrapped, timeout=tool_call_timeout)
                         except asyncio.TimeoutError:
+                            _note_timeout(label)
                             cf.cancel()
                             raise RuntimeError(
                                 f"{label} exceeded code_tool_call_timeout ({tool_call_timeout}s)"
@@ -1070,6 +1136,8 @@ class Tools:
             # bridged from the worker thread. This avoids "future attached to a
             # different loop" errors while keeping orchestration off the main loop.
             async def _call(server_id, function_name, args=None, **kwargs):
+                if cancel_script.is_set():
+                    raise TimeoutError("script exceeded code_timeout")
                 merged = dict(args or {})
                 merged.update(kwargs)
                 call_count["n"] += 1
@@ -1077,13 +1145,31 @@ class Tools:
                     raise RuntimeError(
                         f"tool-call limit ({max_calls}) exceeded; raise code_max_calls if intended"
                     )
-                cf = asyncio.run_coroutine_threadsafe(
-                    self._invoke(__request__, user_model, server_id, function_name, merged, __metadata__),
-                    main_loop,
-                )
-                return await _await_main_future(cf, f"tool call {server_id}.{function_name}")
+                label = f"tool call {server_id}.{function_name}"
+
+                async def _run_call():
+                    if cancel_script.is_set():
+                        raise TimeoutError("script exceeded code_timeout")
+                    _enter_tool_call()
+                    try:
+                        cf = asyncio.run_coroutine_threadsafe(
+                            self._invoke(__request__, user_model, server_id, function_name, merged, __metadata__),
+                            main_loop,
+                        )
+                        return await _await_main_future(cf, label)
+                    finally:
+                        _leave_tool_call()
+
+                sem = _parallel_semaphore()
+                if sem is None:
+                    return await _run_call()
+                async with sem:
+                    return await _run_call()
 
             async def _search(query, top_k=None):
+                if cancel_script.is_set():
+                    raise TimeoutError("script exceeded code_timeout")
+                search_count["n"] += 1
                 cf = asyncio.run_coroutine_threadsafe(
                     self._accessible_entries(__request__, user_model), main_loop
                 )
@@ -1163,14 +1249,20 @@ class Tools:
                     "error": f"Script exceeded code_timeout ({timeout}s)",
                     "partial_output": partial,
                     "cancelled_tool_calls": len(pending),
+                    "diagnostics": _script_diagnostics({"cancelled_tool_calls": len(pending)}),
                 })
             except PermissionError as e:
                 return json.dumps({"error": f"Access denied during script: {e}",
-                                   "output": "".join(buffer)[:2000]})
+                                   "output": "".join(buffer)[:2000],
+                                   "diagnostics": _script_diagnostics()})
             except Exception as e:
                 partial = "".join(buffer)[: self.valves.code_max_output_chars]
                 await self._emit(__event_emitter__, f"❌ Script error: {e}", done=True)
-                return json.dumps({"error": f"{type(e).__name__}: {e}", "partial_output": partial})
+                return json.dumps({
+                    "error": f"{type(e).__name__}: {e}",
+                    "partial_output": partial,
+                    "diagnostics": _script_diagnostics(),
+                })
 
             output = "".join(buffer)
             await self._emit(__event_emitter__, f"✅ Script finished ({call_count['n']} tool call(s))", done=True)
