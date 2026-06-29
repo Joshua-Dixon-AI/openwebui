@@ -139,6 +139,7 @@ _ALLOWED_NODES = {
 # The set of names advertised in validator error messages:
 _SAFE_MODULE_NAMES = (
     "json", "math", "re", "datetime", "collections", "itertools", "textwrap", "string",
+    "urllib.parse", "base64", "hashlib", "random", "uuid",
 )
 
 
@@ -158,6 +159,11 @@ def _build_sandbox_globals() -> dict:
     import itertools as _it
     import textwrap as _tw
     import string as _st
+    import urllib.parse as _urlparse
+    import base64 as _b64
+    import hashlib as _hl
+    import random as _rnd
+    import uuid as _uuid
     from types import SimpleNamespace
 
     g: dict = {}
@@ -258,6 +264,62 @@ def _build_sandbox_globals() -> dict:
         whitespace=_st.whitespace,
     )
 
+    # urllib.parse — URL encoding/decoding and parsing
+    g["urllib"] = SimpleNamespace(
+        parse=SimpleNamespace(
+            quote=_urlparse.quote,
+            unquote=_urlparse.unquote,
+            quote_plus=_urlparse.quote_plus,
+            unquote_plus=_urlparse.unquote_plus,
+            urlencode=_urlparse.urlencode,
+            urlparse=_urlparse.urlparse,
+            urlunparse=_urlparse.urlunparse,
+            parse_qs=_urlparse.parse_qs,
+            parse_qsl=_urlparse.parse_qsl,
+        )
+    )
+
+    # base64 — binary-to-text encoding and decoding
+    g["base64"] = SimpleNamespace(
+        b64encode=_b64.b64encode,
+        b64decode=_b64.b64decode,
+        urlsafe_b64encode=_b64.urlsafe_b64encode,
+        urlsafe_b64decode=_b64.urlsafe_b64decode,
+        standard_b64encode=_b64.standard_b64encode,
+        standard_b64decode=_b64.standard_b64decode,
+    )
+
+    # hashlib — hash digests (md5, sha256, etc.)
+    g["hashlib"] = SimpleNamespace(
+        md5=_hl.md5,
+        sha1=_hl.sha1,
+        sha224=_hl.sha224,
+        sha256=_hl.sha256,
+        sha384=_hl.sha384,
+        sha512=_hl.sha512,
+    )
+
+    # random — basic pseudo-random utilities
+    g["random"] = SimpleNamespace(
+        random=_rnd.random,
+        randint=_rnd.randint,
+        randrange=_rnd.randrange,
+        choice=_rnd.choice,
+        choices=_rnd.choices,
+        sample=_rnd.sample,
+        shuffle=_rnd.shuffle,
+        uniform=_rnd.uniform,
+    )
+
+    # uuid — generate UUIDs
+    g["uuid"] = SimpleNamespace(
+        uuid1=_uuid.uuid1,
+        uuid3=_uuid.uuid3,
+        uuid4=_uuid.uuid4,
+        uuid5=_uuid.uuid5,
+        UUID=_uuid.UUID,
+    )
+
     return g
 
 # Names that must never resolve inside the sandbox (escape hatches).
@@ -356,6 +418,7 @@ def rows(result):
       • Databricks Statement Execution — ``result.data_array`` (or top-level
         ``data_array``) with ``{"values": [{"string_value": ...}, ...]}`` rows
       • a generic ``{"rows": [[...], ...]}`` mapping
+      • a list of dictionaries (keys are normalized as columns)
       • a bare list of rows / scalars
     Returns ``[]`` when no tabular data is found. Exposed inside run_tool_script.
     """
@@ -376,7 +439,29 @@ def rows(result):
         if isinstance(result.get("rows"), list):
             return result["rows"]
     if isinstance(result, list):
+        if result and all(isinstance(r, dict) for r in result):
+            keys = list(result[0].keys())
+            return [[r.get(k) for k in keys] for r in result]
         return [r if isinstance(r, list) else [r] for r in result]
+    return []
+
+
+def columns(result):
+    """Normalize a tool result to extract column names/headers.
+
+    Handles Databricks schema headers, generic dicts with 'columns'/'headers'/'keys',
+    and lists of dicts. Returns [] if not tabular.
+    """
+    if isinstance(result, dict):
+        schema = result.get("result", {}).get("schema") or result.get("schema")
+        if isinstance(schema, dict) and isinstance(schema.get("columns"), list):
+            return [col.get("name") for col in schema["columns"] if isinstance(col, dict) and "name" in col]
+        for k in ("columns", "headers", "keys"):
+            if isinstance(result.get(k), list):
+                return [str(x) for x in result[k]]
+    if isinstance(result, list) and result:
+        if all(isinstance(r, dict) for r in result):
+            return list(result[0].keys())
     return []
 
 
@@ -1100,6 +1185,7 @@ class Tools:
                 "search": _search,
                 "gather": asyncio.gather,
                 "rows": rows,
+                "columns": columns,
                 "print": _print,
             }
             # Bind safe module facades (SimpleNamespaces — never real module
