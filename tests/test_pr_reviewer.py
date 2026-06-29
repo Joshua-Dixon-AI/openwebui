@@ -13,7 +13,7 @@ from pr_reviewer import main
 class TestPRReviewer(unittest.TestCase):
     def setUp(self):
         # Clear/store environment variables
-        self.env_patcher = patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-api-key"})
+        self.env_patcher = patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-api-key", "PR_NUMBER": "5"})
         self.env_patcher.start()
 
     def tearDown(self):
@@ -55,6 +55,9 @@ class TestPRReviewer(unittest.TestCase):
             mock_file.assert_called_once_with("review.md", "w", encoding="utf-8")
             mock_file().write.assert_called_once_with("### 🤖 DeepSeek AI Code Review\n\nLooks good! No issues found.")
 
+        # Verify diff fetch with PR_NUMBER
+        mock_check_output.assert_called_once_with(["gh", "pr", "diff", "5"], text=True)
+
         # Verify API request details
         mock_urlopen.assert_called_once()
         req_arg = mock_urlopen.call_args[0][0]
@@ -62,8 +65,8 @@ class TestPRReviewer(unittest.TestCase):
         self.assertEqual(req_arg.get_header("Authorization"), "Bearer test-api-key")
         self.assertEqual(req_arg.full_url, "https://api.deepseek.com/v1/chat/completions")
 
-        # Verify gh PR review call
-        mock_run.assert_called_once_with(["gh", "pr", "review", "--comment", "-F", "review.md"], check=True)
+        # Verify gh PR review call with PR_NUMBER
+        mock_run.assert_called_once_with(["gh", "pr", "review", "5", "--comment", "-F", "review.md"], check=True)
         # Verify cleanup
         mock_remove.assert_called_once_with("review.md")
 

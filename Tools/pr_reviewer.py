@@ -11,9 +11,14 @@ def main():
         print("Error: DEEPSEEK_API_KEY environment variable is not set.")
         sys.exit(1)
 
+    pr_number = os.environ.get("PR_NUMBER")
+
     # 2. Get PR diff using gh CLI
     try:
-        diff = subprocess.check_output(["gh", "pr", "diff"], text=True)
+        cmd = ["gh", "pr", "diff"]
+        if pr_number:
+            cmd.append(pr_number)
+        diff = subprocess.check_output(cmd, text=True)
     except subprocess.CalledProcessError as e:
         print(f"Error getting PR diff: {e}")
         sys.exit(1)
@@ -67,7 +72,11 @@ def main():
         f.write("### 🤖 DeepSeek AI Code Review\n\n" + review_text)
 
     try:
-        subprocess.run(["gh", "pr", "review", "--comment", "-F", review_file], check=True)
+        cmd = ["gh", "pr", "review"]
+        if pr_number:
+            cmd.append(pr_number)
+        cmd.extend(["--comment", "-F", review_file])
+        subprocess.run(cmd, check=True)
         print("Review successfully posted on the PR!")
     except subprocess.CalledProcessError as e:
         print(f"Error posting review: {e}")
